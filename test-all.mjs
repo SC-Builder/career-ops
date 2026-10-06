@@ -4958,6 +4958,76 @@ try {
     fail(`normalizeUrlForDedup left a case-only duplicate: ${normalizeUrlForDedup(wdMixed)} vs ${normalizeUrlForDedup(wdLower)}`);
   }
 
+  // Locale path segment: Workday serves one requisition under both
+  // `/en-US/{site}/job/…` and `/{site}/job/…`, so a scan that saw it one way
+  // queued it again when a later scan saw it the other, which is how one
+  // requisition came to sit in pipeline.md twice. Synthetic tenant, exact
+  // shape of the pair that surfaced the bug.
+  const wdLocale = 'https://acme.wd1.myworkdayjobs.com/en-US/Acme_Careers/job/Dallas-TX-75001-Acme-Corporate-HQ/Senior-Backend-Engineer_R12345';
+  const wdNoLocale = 'https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Dallas-TX-75001-Acme-Corporate-HQ/Senior-Backend-Engineer_R12345';
+  if (normalizeUrlForDedup(wdLocale) === normalizeUrlForDedup(wdNoLocale)) {
+    pass('normalizeUrlForDedup collapses a leading /en-US/ locale segment (Workday same-requisition duplicate)');
+  } else {
+    fail(`normalizeUrlForDedup left a locale-only duplicate: ${normalizeUrlForDedup(wdLocale)} vs ${normalizeUrlForDedup(wdNoLocale)}`);
+  }
+
+  // merge-tracker's key must agree, or the tracker re-splits what the scanner
+  // just collapsed. Same two URLs, through url-key.mjs.
+  const { normalizeUrl, stripLocalePathSegment } = await import(pathToFileURL(join(ROOT, 'url-key.mjs')).href);
+  if (normalizeUrl(wdLocale) === normalizeUrl(wdNoLocale) && normalizeUrl(wdLocale) !== '') {
+    pass('url-key.mjs normalizeUrl collapses the same /en-US/ locale segment (one key across scanner and tracker)');
+  } else {
+    fail(`url-key.mjs normalizeUrl left a locale-only duplicate: ${normalizeUrl(wdLocale)} vs ${normalizeUrl(wdNoLocale)}`);
+  }
+
+  // Conservatism: the strip must not eat a real path segment. Every case below
+  // is a FALSE merge if it collapses — two employers' boards or two regional
+  // requisitions reading as one posting.
+  const localeNegatives = [
+    // Bare two/three-letter first segments are Workday *site* names in this
+    // user's own pipeline (`/EXT/`, `/ant/`, `/cni/`), and `/us/` vs `/ca/` on
+    // a careers site is a region split with two different reqs behind it.
+    ['https://globex.wd1.myworkdayjobs.com/EXT/job/OH/Sr-PM_20182534', 'EXT'],
+    ['https://careers.example.com/en/jobs/1', 'bare en'],
+    ['https://careers.example.com/us/jobs/1', 'bare us'],
+    // `co` is ISO 639-1 (Corsican) and `op` is not an assigned region — a
+    // co-op programme's path segment, not a locale. This is what the region
+    // half of the allowlist is for.
+    ['https://careers.example.com/co-op/jobs/1', 'co-op'],
+    // Region-shaped, but `ext` is not a language — this is the tenant-name
+    // collision the ISO 639-1 allowlist exists to stop.
+    ['https://acme.wd1.myworkdayjobs.com/EXT_US/job/Dallas/PM_1', 'EXT_US'],
+    // Not first — Oracle's `/hcmUI/CandidateExperience/en/sites/…`. Known gap,
+    // kept on purpose: a mid-path segment is likelier to be functional.
+    ['https://acme.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/1', 'mid-path en'],
+  ];
+  const localeEaten = localeNegatives.filter(([url]) => {
+    const u = new URL(url);
+    stripLocalePathSegment(u);
+    return u.pathname !== new URL(url).pathname;
+  });
+  if (localeEaten.length === 0) {
+    pass('stripLocalePathSegment leaves non-locale and mid-path segments alone (no false merges)');
+  } else {
+    fail(`stripLocalePathSegment ate a real path segment: ${localeEaten.map(([, label]) => label).join(', ')}`);
+  }
+
+  // Something must survive the strip: `host/en-US` reducing to `host/` would
+  // give every locale root on that host one key shared with the whole host.
+  const localeOnly = new URL('https://careers.example.com/en-US');
+  stripLocalePathSegment(localeOnly);
+  // And the forms that SHOULD collapse: `_` separator, script subtag, casing.
+  const localeVariants = ['en_US', 'pt-BR', 'zh-Hans-CN', 'EN-us', 'es-419'].every((tag) => {
+    const u = new URL(`https://careers.example.com/${tag}/Site/job/PM_1`);
+    stripLocalePathSegment(u);
+    return u.pathname === '/Site/job/PM_1';
+  });
+  if (localeOnly.pathname === '/en-US' && localeVariants) {
+    pass('stripLocalePathSegment keeps a lone locale segment but strips en_US/pt-BR/zh-Hans-CN/EN-us/es-419 when a path survives');
+  } else {
+    fail(`stripLocalePathSegment guards wrong: loneSegment=${localeOnly.pathname} variantsCollapsed=${localeVariants}`);
+  }
+
   // ...but query values stay case-sensitive: they can be identity-bearing.
   if (normalizeUrlForDedup('https://boards.greenhouse.io/acme/jobs/9?gh_jid=AbC').includes('gh_jid=AbC')) {
     pass('normalizeUrlForDedup preserves query-value casing (identity-bearing params)');

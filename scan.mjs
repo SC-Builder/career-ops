@@ -76,7 +76,7 @@ import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { SCAN_HISTORY_COLUMNS, parseScanHistoryLine } from './lib/scan-history-columns.mjs';
-import { promoteKnownFragmentIdentity } from './url-key.mjs';
+import { promoteKnownFragmentIdentity, stripLocalePathSegment } from './url-key.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 
 const CODE_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -1588,9 +1588,12 @@ const DEDUP_STRIP_PARAMS = new Set([
 /**
  * Normalize a job posting URL into a stable dedup key.
  *
- * Strips cosmetic query params (locale/tracking), promotes recognized
- * hash-route job IDs before dropping other fragments, drops a trailing slash,
- * and lowercases scheme, host, and path. Only used to compute the *comparison*
+ * Strips cosmetic query params (locale/tracking), drops a leading locale path
+ * segment (Workday's `/en-US/{site}/job/…` is the same posting as
+ * `/{site}/job/…` — see stripLocalePathSegment in url-key.mjs for why only a
+ * region-qualified, allowlisted locale counts), promotes recognized hash-route
+ * job IDs before dropping other fragments, drops a trailing slash, and
+ * lowercases scheme, host, and path. Only used to compute the *comparison*
  * key — callers keep writing/displaying the original URL so links stay
  * clickable and scan-history/pipeline.md stay faithful to what the provider
  * returned.
@@ -1626,6 +1629,7 @@ export function normalizeUrlForDedup(url) {
       parsed.searchParams.delete(param);
     }
   }
+  stripLocalePathSegment(parsed);
   promoteKnownFragmentIdentity(parsed);
   parsed.hash = '';
   parsed.pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase() || '/';

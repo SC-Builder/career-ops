@@ -10,8 +10,9 @@
  *   - under-normalizing leaves two spellings of the SAME posting as two keys
  *     → a VISIBLE duplicate row you can see and fix.
  * So we strip only a denylist of known tracking params, lowercase the host,
- * force https, drop non-identity fragments + a trailing slash, and sort the
- * remaining query — and KEEP every functional query param (e.g. gh_jid, which
+ * force https, drop a leading locale path segment (`/en-US/`, allowlisted
+ * language subtag + required region — see stripLocalePathSegment), drop
+ * non-identity fragments + a trailing slash, and sort the remaining query — and KEEP every functional query param (e.g. gh_jid, which
  * on some corporate-hosted Greenhouse boards is the canonical posting id).
  *
  * This mirrors RFC 3986 §6, whose comparison ladder runs simple-string →
@@ -265,6 +266,133 @@ export function aggregatorPostingId(raw) {
   return id ? { domain: agg.domain, id } : null;
 }
 
+// ISO 639-1 two-letter language subtags. An allowlist, for the same reason
+// TRACKING_PARAMS is one: the shape `xx-YY` is not rare in an ATS path. A
+// Workday site named `EXT_US` or `ANT-CA` is structurally a locale and
+// semantically a tenant, and stripping it would merge two employers' boards
+// into one key — the silent direction this module refuses to fail in. Checking
+// the language subtag against the real list is what separates `en-US` (a
+// locale, always) from `ext-US` (a site name, never). Three-letter ISO 639-2
+// subtags are deliberately absent: they are vanishingly rare in ATS URLs and
+// admitting them is exactly what would let `EXT_US` through.
+const ISO_639_1 = new Set([
+  'aa', 'ab', 'ae', 'af', 'ak', 'am', 'an', 'ar', 'as', 'av', 'ay', 'az',
+  'ba', 'be', 'bg', 'bh', 'bi', 'bm', 'bn', 'bo', 'br', 'bs',
+  'ca', 'ce', 'ch', 'co', 'cr', 'cs', 'cu', 'cv', 'cy',
+  'da', 'de', 'dv', 'dz',
+  'ee', 'el', 'en', 'eo', 'es', 'et', 'eu',
+  'fa', 'ff', 'fi', 'fj', 'fo', 'fr', 'fy',
+  'ga', 'gd', 'gl', 'gn', 'gu', 'gv',
+  'ha', 'he', 'hi', 'ho', 'hr', 'ht', 'hu', 'hy', 'hz',
+  'ia', 'id', 'ie', 'ig', 'ii', 'ik', 'io', 'is', 'it', 'iu',
+  'ja', 'jv',
+  'ka', 'kg', 'ki', 'kj', 'kk', 'kl', 'km', 'kn', 'ko', 'kr', 'ks', 'ku', 'kv', 'kw', 'ky',
+  'la', 'lb', 'lg', 'li', 'ln', 'lo', 'lt', 'lu', 'lv',
+  'mg', 'mh', 'mi', 'mk', 'ml', 'mn', 'mr', 'ms', 'mt', 'my',
+  'na', 'nb', 'nd', 'ne', 'ng', 'nl', 'nn', 'no', 'nr', 'nv', 'ny',
+  'oc', 'oj', 'om', 'or', 'os',
+  'pa', 'pi', 'pl', 'ps', 'pt',
+  'qu',
+  'rm', 'rn', 'ro', 'ru', 'rw',
+  'sa', 'sc', 'sd', 'se', 'sg', 'si', 'sk', 'sl', 'sm', 'sn', 'so', 'sq', 'sr', 'ss', 'st', 'su', 'sv', 'sw',
+  'ta', 'te', 'tg', 'th', 'ti', 'tk', 'tl', 'tn', 'to', 'tr', 'ts', 'tt', 'tw', 'ty',
+  'ug', 'uk', 'ur', 'uz',
+  've', 'vi', 'vo',
+  'wa', 'wo',
+  'xh',
+  'yi', 'yo',
+  'za', 'zh', 'zu',
+]);
+
+// `{lang}[-{Script}]-{REGION}` with `-` or `_` as the separator: `en-US`,
+// `en_US`, `pt-BR`, `zh-Hans-CN`, `es-419`. The REGION subtag is REQUIRED.
+// That is the whole conservatism of this rule: a bare `/en/`, `/de/`, `/it/`
+// first segment is ambiguous — on Workday the first segment is either the
+// locale or the tenant's site name (`/EXT/`, `/ant/`, `/cni/` are all real
+// Workday site segments), and `/us/` vs `/ca/` on a careers site is a
+// region split carrying two DIFFERENT requisitions. Nothing in a bare
+// two-letter segment distinguishes those, so none of them are touched.
+// ISO 3166-1 alpha-2 region subtags. The second half of the allowlist, and it
+// earns its keep on one real shape: `/co-op/jobs/…`. `co` IS a valid ISO 639-1
+// code (Corsican), so language-checking alone would read a co-op programme's
+// path segment as a locale and strip it. `op` is not an assigned region, so
+// checking both subtags refuses it. Same for `/hi-fi/`, `/to-do/` and the rest
+// of the two-plus-two English pairs that are not locales.
+//
+// It narrows the residual rather than closing it: `to-do` survives both checks
+// (`to` is Tongan, `do` is the Dominican Republic). No further rule separates
+// that from a real locale, so the remaining defence is that a two-letter pair
+// like it is not a first path segment any ATS emits. If one ever shows up, it
+// goes on a negative list here — it is not something the shape can rule out.
+const ISO_3166_1_ALPHA_2 = new Set([
+  'ad', 'ae', 'af', 'ag', 'ai', 'al', 'am', 'ao', 'aq', 'ar', 'as', 'at', 'au', 'aw', 'ax', 'az',
+  'ba', 'bb', 'bd', 'be', 'bf', 'bg', 'bh', 'bi', 'bj', 'bl', 'bm', 'bn', 'bo', 'bq', 'br', 'bs', 'bt', 'bv', 'bw', 'by', 'bz',
+  'ca', 'cc', 'cd', 'cf', 'cg', 'ch', 'ci', 'ck', 'cl', 'cm', 'cn', 'co', 'cr', 'cu', 'cv', 'cw', 'cx', 'cy', 'cz',
+  'de', 'dj', 'dk', 'dm', 'do', 'dz',
+  'ec', 'ee', 'eg', 'eh', 'er', 'es', 'et',
+  'fi', 'fj', 'fk', 'fm', 'fo', 'fr',
+  'ga', 'gb', 'gd', 'ge', 'gf', 'gg', 'gh', 'gi', 'gl', 'gm', 'gn', 'gp', 'gq', 'gr', 'gs', 'gt', 'gu', 'gw', 'gy',
+  'hk', 'hm', 'hn', 'hr', 'ht', 'hu',
+  'id', 'ie', 'il', 'im', 'in', 'io', 'iq', 'ir', 'is', 'it',
+  'je', 'jm', 'jo', 'jp',
+  'ke', 'kg', 'kh', 'ki', 'km', 'kn', 'kp', 'kr', 'kw', 'ky', 'kz',
+  'la', 'lb', 'lc', 'li', 'lk', 'lr', 'ls', 'lt', 'lu', 'lv', 'ly',
+  'ma', 'mc', 'md', 'me', 'mf', 'mg', 'mh', 'mk', 'ml', 'mm', 'mn', 'mo', 'mp', 'mq', 'mr', 'ms', 'mt', 'mu', 'mv', 'mw', 'mx', 'my', 'mz',
+  'na', 'nc', 'ne', 'nf', 'ng', 'ni', 'nl', 'no', 'np', 'nr', 'nu', 'nz',
+  'om',
+  'pa', 'pe', 'pf', 'pg', 'ph', 'pk', 'pl', 'pm', 'pn', 'pr', 'ps', 'pt', 'pw', 'py',
+  'qa',
+  're', 'ro', 'rs', 'ru', 'rw',
+  'sa', 'sb', 'sc', 'sd', 'se', 'sg', 'sh', 'si', 'sj', 'sk', 'sl', 'sm', 'sn', 'so', 'sr', 'ss', 'st', 'sv', 'sx', 'sy', 'sz',
+  'tc', 'td', 'tf', 'tg', 'th', 'tj', 'tk', 'tl', 'tm', 'tn', 'to', 'tr', 'tt', 'tv', 'tw', 'tz',
+  'ua', 'ug', 'um', 'us', 'uy', 'uz',
+  'va', 'vc', 've', 'vg', 'vi', 'vn', 'vu',
+  'wf', 'ws',
+  'ye', 'yt',
+  'za', 'zm', 'zw',
+]);
+
+const LOCALE_SEGMENT_RE = /^([A-Za-z]{2})(?:[-_][A-Za-z]{4})?[-_](?:([A-Za-z]{2})|[0-9]{3})$/;
+
+/**
+ * Drop a leading locale path segment so the same requisition served under
+ * `/en-US/` and served bare produce one key.
+ *
+ * Workday is the case that forced this: `…myworkdayjobs.com/en-US/{site}/job/…`
+ * and `…myworkdayjobs.com/{site}/job/…` are byte-different URLs for one
+ * posting, so a scan that saw it one way queued it again when a later scan saw
+ * it the other way. Phenom, SuccessFactors and other vendors prefix the same
+ * way.
+ *
+ * Four guards, each one a merge this must not make:
+ *   - FIRST segment only. `/hcmUI/CandidateExperience/en/sites/…` (Oracle) is
+ *     left alone; catching it would mean trusting a bare `en` mid-path, and a
+ *     mid-path segment is far likelier to be functional. A known, accepted gap.
+ *   - Both subtags must be real codes: ISO 639-1 for the language, ISO 3166-1
+ *     alpha-2 for the region (see both allowlists above).
+ *   - At least one segment must SURVIVE. `host/en-US` alone would otherwise
+ *     reduce to `host/`, giving every locale root on that host one key that
+ *     the rest of the host's postings are then compared against.
+ *
+ * Mutates only the URL object used to build a comparison key; the URL written
+ * to pipeline.md / scan-history.tsv / the tracker stays verbatim.
+ *
+ * @param {URL} url
+ */
+export function stripLocalePathSegment(url) {
+  const segments = url.pathname.split('/');
+  // A leading '/' makes segments[0] === '' — the first real segment is [1],
+  // and [2] existing is the "something survives" guard.
+  if (segments.length < 3 || segments[0] !== '' || !segments[2]) return;
+  const match = LOCALE_SEGMENT_RE.exec(segments[1]);
+  if (!match) return;
+  if (!ISO_639_1.has(match[1].toLowerCase())) return;
+  // A numeric region (es-419) has no alpha-2 form to check.
+  if (match[2] && !ISO_3166_1_ALPHA_2.has(match[2].toLowerCase())) return;
+  segments.splice(1, 1);
+  url.pathname = segments.join('/');
+}
+
 /**
  * Promote a known identity-bearing SPA fragment into a functional query key
  * before generic URL normalization drops the fragment. Most fragments are
@@ -318,6 +446,7 @@ export function normalizeUrl(raw) {
 
   u.protocol = 'https:';            // http vs https is the same posting
   u.hostname = foldHostname(u.hostname);
+  stripLocalePathSegment(u);        // /en-US/{site}/job/… === /{site}/job/…
   promoteKnownFragmentIdentity(u);
   u.hash = '';                      // unrecognized fragments do not identify it
 

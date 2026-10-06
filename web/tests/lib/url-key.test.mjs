@@ -25,6 +25,33 @@ test("web mirror matches core on ordinary postings (https upgrade, hostname lowe
   }
 });
 
+test("web mirror strips the leading locale path segment exactly as core does", () => {
+  // One Workday requisition served under both spellings. The server builds the
+  // scan-history key Set with this mirror and the client looks offers up in it,
+  // so a locale segment the two sides disagree about means `known.has(key)`
+  // quietly stops matching the posting it already saw.
+  const withLocale =
+    "https://acme.wd1.myworkdayjobs.com/en-US/Acme_Careers/job/Dallas-TX-75001-Acme-Corporate-HQ/Senior-Backend-Engineer_R12345";
+  const bare =
+    "https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Dallas-TX-75001-Acme-Corporate-HQ/Senior-Backend-Engineer_R12345";
+  assert.equal(webKey(withLocale), webKey(bare));
+  assert.equal(webKey(withLocale), coreKey(withLocale));
+  assert.equal(webKey(bare), coreKey(bare));
+
+  // ...and agrees with core on the segments that must survive: a Workday site
+  // name, a region-shaped non-language subtag, a bare two-letter segment.
+  for (const input of [
+    "https://globex.wd1.myworkdayjobs.com/EXT/job/OH/Sr-PM_20182534",
+    "https://acme.wd1.myworkdayjobs.com/EXT_US/job/Dallas/PM_1",
+    "https://careers.example.com/us/jobs/1",
+    "https://careers.example.com/co-op/jobs/1",
+    "https://careers.example.com/en-US",
+  ]) {
+    assert.equal(webKey(input), coreKey(input), `parity: ${input}`);
+    assert.ok(webKey(input).includes(new URL(input).pathname.split("/")[1]), `kept: ${input}`);
+  }
+});
+
 test("web mirror strips the same tracking-param denylist as core, in the same sorted order", () => {
   const url = "https://boards.greenhouse.io/acme/jobs/apply?utm_source=li&gh_jid=4471829005&fbclid=xyz";
   assert.equal(
