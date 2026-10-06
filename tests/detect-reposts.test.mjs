@@ -521,23 +521,62 @@ const mixedResult = detectReposts([
 eq('same URL seen twice + 1 different URL -> 1 cluster', mixedResult.length, 1);
 eq('deduped to 2 appearances (not 3)', mixedResult[0]?.repostCount, 2);
 
-// Same URL with trailing slash vs without — treated as different URLs
-// (this is correct: URL normalization is scan.mjs's job, not ours)
-eq('URL with/without trailing slash treated as different', detectReposts([
+// Cosmetic URL variants are ONE posting, so none of the three below is a
+// repost. This reverses a contract these cases used to assert, whose stated
+// reason was that "URL normalization is scan.mjs's job, not ours" — i.e. a row
+// reaching scan-history.tsv is already canonical, so two raw strings in the
+// file mean two postings.
+//
+// That premise is false, and the file itself is the counter-example.
+// scan.mjs normalizes only to DECIDE whether to write; what it writes is the
+// provider's URL verbatim, because scan-history.tsv and pipeline.md are meant
+// to stay faithful to what the board returned and to keep their links
+// clickable (see normalizeUrlForDedup's own docstring). So the ledger holds
+// non-canonical spellings by design. It is also append-only and years long,
+// which means it holds rows written under every PAST version of the key: the
+// locale-segment fix landed after a real scanner had already recorded one
+// requisition under two spellings months apart, and no change to
+// scan.mjs can retroactively canonicalize a row already on disk. A reader of
+// that ledger has to apply the current key itself.
+//
+// The three cases are also wrong on their own terms, which is the clearest
+// argument: `/1` vs `/1/`, `#section` vs `#other`, and `?ref=linkedin` vs
+// `?ref=google` are the same posting by every definition in this repo —
+// `ref` is in scan.mjs's DEDUP_STRIP_PARAMS precisely because it identifies
+// the click, not the job. Asserting a repost for them pinned three false
+// positives as expected behaviour.
+eq('URL with/without trailing slash is one posting, not a repost', detectReposts([
   row({ url: 'https://x.com/1', date: d('2026-01-01'), dateStr: '2026-01-01' }),
   row({ url: 'https://x.com/1/', date: d('2026-02-01'), dateStr: '2026-02-01' }),
-]).length, 1);
+]).length, 0);
 
-// URL with different fragments
-eq('URL with different fragments treated as different', detectReposts([
+// Fragments do not identify a posting (the recognized `#/job/{id}` SPA routes
+// are promoted into the key before the fragment is dropped, so those still
+// separate two postings — see promoteKnownFragmentIdentity).
+eq('URL with different fragments is one posting, not a repost', detectReposts([
   row({ url: 'https://x.com/1#section', date: d('2026-01-01'), dateStr: '2026-01-01' }),
   row({ url: 'https://x.com/1#other', date: d('2026-02-01'), dateStr: '2026-02-01' }),
-]).length, 1);
+]).length, 0);
 
-// URL with query params
-eq('URL with different query params treated as different', detectReposts([
+eq('URL with different tracking params is one posting, not a repost', detectReposts([
   row({ url: 'https://x.com/1?ref=linkedin', date: d('2026-01-01'), dateStr: '2026-01-01' }),
   row({ url: 'https://x.com/1?ref=google', date: d('2026-02-01'), dateStr: '2026-02-01' }),
+]).length, 0);
+
+// ...but an IDENTITY-bearing param still separates two postings. This is the
+// guard on the paragraph above: the normalizer narrows what counts as distinct
+// only through an allowlist, so folding cosmetic variants must not fold two
+// real requisitions that differ by `gh_jid`.
+eq('URL with different gh_jid is still two postings', detectReposts([
+  row({ url: 'https://boards.greenhouse.io/acme/jobs/1?gh_jid=111', date: d('2026-01-01'), dateStr: '2026-01-01' }),
+  row({ url: 'https://boards.greenhouse.io/acme/jobs/1?gh_jid=222', date: d('2026-02-01'), dateStr: '2026-02-01' }),
+]).length, 1);
+
+// A malformed URL has no key, so normalizeUrlForDedup returns it verbatim and
+// unparseable rows keep exactly the distinctness they had.
+eq('two malformed URLs keep their raw-string distinctness', detectReposts([
+  row({ url: 'not a url at all', date: d('2026-01-01'), dateStr: '2026-01-01' }),
+  row({ url: 'also not a url', date: d('2026-02-01'), dateStr: '2026-02-01' }),
 ]).length, 1);
 
 // ============================================================================

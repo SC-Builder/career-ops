@@ -485,15 +485,24 @@ test('every scan-history writer stamps the local day', () => {
 });
 
 test('two dates for one posting is all detect-reposts needs to call it a repost', () => {
-  // Why the census above is load-bearing. These two rows are ONE posting seen
-  // once, in one evening, by two scanners: the curated portals.yml Workday
-  // entry and the same tenant reached through the reverse-ATS dataset — the
-  // differing-path-case case normalizeUrlForDedup's own docstring describes.
+  // Why the census above is load-bearing. These two rows are ONE requisition
+  // (R123) seen once, in one evening, by two scanners: the curated portals.yml
+  // Workday entry and the same tenant reached through the reverse-ATS dataset.
   // Distinct URLs + distinct dates + span 1 is exactly a repost cluster.
+  //
+  // The pair is the #3439 shape — one tenant publishing a requisition under two
+  // SITE path segments (`/Careers/` and `/External/`). It has to be a shape the
+  // reader's key cannot fold: detect-reposts now compares normalized keys, so a
+  // pair differing only in path case or a locale segment (what this fixture used
+  // to be) collapses to one URL and no longer demonstrates anything. The census
+  // still matters because normalization cannot reach every such pair — see
+  // tests/scan-ats-full-dedup-key.test.mjs, which pins that normalizeUrlForDedup
+  // alone does NOT collapse two sites — and because a wrong day is wrong in the
+  // span, window and follow-up arithmetic regardless.
   const tsv = [
     'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation',
     'https://acme.wd1.myworkdayjobs.com/en-US/Careers/job/Senior-Backend-Engineer_R123\t2026-08-22\tworkday\tSenior Backend Engineer\tAcme\tadded\tRemote',
-    'https://acme.wd1.myworkdayjobs.com/en-US/careers/job/senior-backend-engineer_R123\t2026-08-23\tworkday\tSenior Backend Engineer\tAcme\tadded\tRemote',
+    'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Senior-Backend-Engineer_R123\t2026-08-23\tworkday\tSenior Backend Engineer\tAcme\tadded\tRemote',
   ].join('\n');
 
   const clusters = detectReposts(parseScanHistory(tsv), 90, 1, null);

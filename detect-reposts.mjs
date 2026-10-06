@@ -4,10 +4,11 @@
  *
  * Reads data/scan-history.tsv, groups rows by company, groups role titles by
  * title identity (see titleIdentityKey), and flags any company+role that
- * appears 2+ times with different URLs, on 2+ distinct scan dates, within a
- * 90-day window. Such clusters are almost certainly the same opening being
- * re-listed by the employer — useful for tracking stale pipelines and
- * ghost postings.
+ * appears 2+ times under different URLs — compared as normalized dedup keys,
+ * so two spellings of one posting count as one URL (see buildRepostCluster) —
+ * on 2+ distinct scan dates, within a 90-day window. Such clusters are almost
+ * certainly the same opening being re-listed by the employer — useful for
+ * tracking stale pipelines and ghost postings.
  *
  * Only rows with status `added` are considered. Rows with a non-`added`
  * status (`skipped_expired`, `skipped_invalid_url`, `skipped_blocked_host`)
@@ -65,6 +66,14 @@ import { fileURLToPath } from 'url';
 import * as yaml from 'js-yaml';
 
 import { roleFuzzyMatch } from './role-matcher.mjs';
+// The scanner's key, not url-key.mjs's `normalizeUrl`. scan-history.tsv is
+// written BY the scanners, so its rows have to be compared with the same
+// function that decided whether to write them. The two keys are not
+// interchangeable here: the scanner's lowercases the path and the tracker's
+// deliberately does not, and the real pair in the comment on byUrl below
+// differs in path case as well as in the locale segment — so the tracker's key
+// leaves that pair uncollapsed and the false repost intact.
+import { normalizeUrlForDedup } from './scan.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { normalizeCompanyName } from './invite-match.mjs';
 import { flagValue, validateFlags, safeIntFlag } from './lib/cli-flags.mjs';
@@ -441,6 +450,23 @@ function groupRowsByTitle(rows) {
 // Rows sharing the same URL are collapsed (only the earliest sighting is kept)
 // so a URL seen on multiple scan dates doesn't inflate the repost count.
 //
+// (a) COUNTS NORMALIZED URLs, not raw strings. One Workday requisition is
+// served under both `/en-US/{site}/job/…` and `/{site}/job/…`, and the scanners
+// have recorded a posting under one spelling on one date and the other spelling
+// months later. Compared as strings those are two URLs on two dates, which
+// satisfies every rule above and produces a repost that never happened — on a
+// real scan-history this reported a 2-repost, 82-day cluster for a single
+// requisition sighted twice (#1205 follow-up). The test for a repost is
+// whether the EMPLOYER created a new posting, so the comparison has to run on
+// the identity of the URL rather than its spelling. normalizeUrlForDedup is the
+// right key for that and not merely a convenient one: its strip list is an
+// allowlist that preserves every identity-bearing param, so a pair it collapses
+// was never two postings.
+//
+// It narrows what counts as distinct; it cannot widen it. A malformed URL falls
+// back to its raw string, so unparseable rows keep exactly the distinctness
+// they had.
+//
 // (c) is what keeps concurrent openings out. Two URLs first seen on the same
 // date were listed side by side in one sweep — that is a company running two
 // requisitions at once, which is the opposite of re-listing one requisition
@@ -449,8 +475,9 @@ function groupRowsByTitle(rows) {
 function buildRepostCluster(clusterRows, windowDays, minSpan = MIN_REPOST_SPAN_DAYS) {
   const byUrl = new Map();
   for (const row of clusterRows) {
-    if (!byUrl.has(row.url) || row.date < byUrl.get(row.url).date) {
-      byUrl.set(row.url, row);
+    const key = normalizeUrlForDedup(row.url);
+    if (!byUrl.has(key) || row.date < byUrl.get(key).date) {
+      byUrl.set(key, row);
     }
   }
   const deduped = [...byUrl.values()];
@@ -610,6 +637,44 @@ function runSelfTest() {
   check(
     detectReposts(perCountry, DEFAULT_WINDOW_DAYS, 0).length === 0,
     'a trailing country word splits the titles even with the span floor disabled',
+  );
+
+  // Shape 4 — ONE requisition, two URL spellings. The scanner wrote this
+  // posting under `/en-US/{site}/…` in July and under the bare, lowercased
+  // `/{site}/…` in September, so compared as strings it was two URLs on two
+  // dates and cleared every constraint above — which is how a real
+  // scan-history came to report a 2-repost, 82-day cluster for one
+  // requisition. Host and names are synthetic; the URL shape and the two
+  // dates are reproduced exactly, and they are the whole fixture.
+  const localeVariant = [
+    scanRow('https://acme.wd1.myworkdayjobs.com/en-US/Acme_Careers/job/Dallas-TX-75001-Acme-Corporate-HQ/Senior-Backend-Engineer_R12345', '2026-07-08', 'Senior Backend Engineer', 'Acme'),
+    scanRow('https://acme.wd1.myworkdayjobs.com/acme_careers/job/Dallas-TX-75001-Acme-Corporate-HQ/Senior-Backend-Engineer_R12345', '2026-09-28', 'Senior Backend Engineer', 'Acme'),
+  ];
+  check(detectReposts(localeVariant, DEFAULT_WINDOW_DAYS).length === 0, 'two URL spellings of one requisition are not a repost');
+  check(
+    detectReposts(localeVariant, DEFAULT_WINDOW_DAYS, 0).length === 0,
+    'the locale-variant pair is rejected on URL identity, not by the span floor (it stays rejected with the floor disabled)',
+  );
+
+  // ...and the collapse must not be able to swallow a genuine repost at the
+  // same employer. Same two spellings plus a THIRD, genuinely different
+  // requisition: the cluster survives with the two real postings in it.
+  const localeVariantPlusReal = [
+    ...localeVariant,
+    scanRow('https://acme.wd1.myworkdayjobs.com/Acme_Careers/job/Dallas-TX-75001-Acme-Corporate-HQ/Senior-Backend-Engineer_R67890', '2026-09-28', 'Senior Backend Engineer', 'Acme'),
+  ];
+  const mixedIdentity = detectReposts(localeVariantPlusReal, DEFAULT_WINDOW_DAYS);
+  check(
+    mixedIdentity.length === 1 && mixedIdentity[0].repostCount === 2,
+    'a genuinely distinct requisition still clusters with the collapsed pair (repostCount 2, not 3)',
+  );
+  // The surviving appearance of the collapsed pair is the EARLIEST sighting,
+  // and it carries the RAW url — normalization keys the comparison, it never
+  // rewrites what the scanner recorded.
+  check(
+    mixedIdentity[0]?.appearances.some(a => a.url === localeVariant[0].url)
+    && !mixedIdentity[0]?.appearances.some(a => a.url === localeVariant[1].url),
+    'the collapsed pair keeps its earliest sighting, raw url intact',
   );
 
   // --- The positive control these constraints must not break: the same role,
